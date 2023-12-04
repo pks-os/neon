@@ -471,6 +471,8 @@ class NeonEnvBuilder:
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
             self.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
         self.env = NeonEnv(self)
+        self.env.init_config()
+        self.env.init()
         return self.env
 
     def start(self):
@@ -717,25 +719,32 @@ class NeonEnv:
             self.control_plane_api = None
             self.attachment_service = None
 
+        self.auth_enabled = config.auth_enabled
+        self.num_pageservers = config.num_pageservers
+        self.num_safekeepers = config.num_safekeepers
+        self.safekeepers_id_start = config.safekeepers_id_start
+        self.sk_remote_storage = config.sk_remote_storage
+        self.pageserver_config_override = config.pageserver_config_override
+        self.safekeepers_enable_fsync = config.safekeepers_enable_fsync
+
+    def init_config(self):
         # Create a config file corresponding to the options
         cfg: Dict[str, Any] = {
             "default_tenant_id": str(self.initial_tenant),
+            "broker": {
+                "listen_addr": self.broker.listen_addr(),
+            },
+            "pageservers": [],
+            "safekeepers": [],
         }
 
         if self.control_plane_api is not None:
             cfg["control_plane_api"] = self.control_plane_api
 
-        cfg["broker"] = {
-            "listen_addr": self.broker.listen_addr(),
-        }
-
         # Create config for pageserver
-        cfg["pageservers"] = []
-        http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
-        pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
-        for ps_id in range(
-            self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + config.num_pageservers
-        ):
+        http_auth_type = "NeonJWT" if self.auth_enabled else "Trust"
+        pg_auth_type = "NeonJWT" if self.auth_enabled else "Trust"
+        for ps_id in range(self.BASE_PAGESERVER_ID, self.BASE_PAGESERVER_ID + self.num_pageservers):
             pageserver_port = PageserverPort(
                 pg=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
@@ -748,44 +757,62 @@ class NeonEnv:
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
             }
-
-            # Create a corresponding NeonPageserver object
-            self.pageservers.append(
-                NeonPageserver(
-                    self,
-                    ps_id,
-                    port=pageserver_port,
-                    config_override=config.pageserver_config_override,
-                )
-            )
             cfg["pageservers"].append(ps_cfg)
 
         # Create config and a Safekeeper object for each safekeeper
-        cfg["safekeepers"] = []
-        for i in range(1, config.num_safekeepers + 1):
+        for i in range(1, self.num_safekeepers + 1):
             port = SafekeeperPort(
                 pg=self.port_distributor.get_port(),
                 pg_tenant_only=self.port_distributor.get_port(),
                 http=self.port_distributor.get_port(),
             )
-            id = config.safekeepers_id_start + i  # assign ids sequentially
+            id = self.safekeepers_id_start + i  # assign ids sequentially
             sk_cfg: Dict[str, Any] = {
                 "id": id,
                 "pg_port": port.pg,
                 "pg_tenant_only_port": port.pg_tenant_only,
                 "http_port": port.http,
-                "sync": config.safekeepers_enable_fsync,
+                "sync": self.safekeepers_enable_fsync,
             }
-            if config.auth_enabled:
+            if self.auth_enabled:
                 sk_cfg["auth_enabled"] = True
-            if config.sk_remote_storage is not None:
-                sk_cfg["remote_storage"] = config.sk_remote_storage.to_toml_inline_table()
-            safekeeper = Safekeeper(env=self, id=id, port=port)
-            self.safekeepers.append(safekeeper)
+            if self.sk_remote_storage is not None:
+                sk_cfg["remote_storage"] = self.sk_remote_storage.to_toml_inline_table()
             cfg["safekeepers"].append(sk_cfg)
 
         log.info(f"Config: {cfg}")
-        self.neon_cli.init(cfg)
+        self.config = cfg
+
+    def init(self, config: Optional[Dict[str, Any]] = None):
+        config = config or self.config
+
+        for ps in config["pageservers"]:
+            self.pageservers.append(
+                NeonPageserver(
+                    self,
+                    id=ps["id"],
+                    port=PageserverPort(
+                        pg=int(ps["listen_pg_addr"].split(":")[1]),
+                        http=int(ps["listen_http_addr"].split(":")[1]),
+                    ),
+                    config_override=self.pageserver_config_override,
+                )
+            )
+
+        for sk in config["safekeepers"]:
+            self.safekeepers.append(
+                Safekeeper(
+                    env=self,
+                    id=sk["id"],
+                    port=SafekeeperPort(
+                        pg=int(sk["pg_port"]),
+                        pg_tenant_only=int(sk["pg_tenant_only_port"]),
+                        http=int(sk["http_port"]),
+                    ),
+                )
+            )
+
+        self.neon_cli.init(config)
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
