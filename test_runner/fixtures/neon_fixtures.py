@@ -28,6 +28,7 @@ import jwt
 import psycopg2
 import pytest
 import requests
+import toml
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
@@ -717,27 +718,19 @@ class NeonEnv:
             self.attachment_service = None
 
         # Create a config file corresponding to the options
-        toml = textwrap.dedent(
-            f"""
-            default_tenant_id = '{config.initial_tenant}'
-        """
-        )
+        cfg: Dict[str, Any] = {
+            "default_tenant_id": str(self.initial_tenant),
+        }
 
         if self.control_plane_api is not None:
-            toml += textwrap.dedent(
-                f"""
-                control_plane_api = '{self.control_plane_api}'
-            """
-            )
+            cfg["control_plane_api"] = self.control_plane_api
 
-        toml += textwrap.dedent(
-            f"""
-            [broker]
-            listen_addr = '{self.broker.listen_addr()}'
-        """
-        )
+        cfg["broker"] = {
+            "listen_addr": self.broker.listen_addr(),
+        }
 
         # Create config for pageserver
+        cfg["pageservers"] = []
         http_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         pg_auth_type = "NeonJWT" if config.auth_enabled else "Trust"
         for ps_id in range(
@@ -748,16 +741,13 @@ class NeonEnv:
                 http=self.port_distributor.get_port(),
             )
 
-            toml += textwrap.dedent(
-                f"""
-                [[pageservers]]
-                id={ps_id}
-                listen_pg_addr = 'localhost:{pageserver_port.pg}'
-                listen_http_addr = 'localhost:{pageserver_port.http}'
-                pg_auth_type = '{pg_auth_type}'
-                http_auth_type = '{http_auth_type}'
-            """
-            )
+            ps_cfg: Dict[str, Any] = {
+                "id": ps_id,
+                "listen_pg_addr": f"localhost:{pageserver_port.pg}",
+                "listen_http_addr": f"localhost:{pageserver_port.http}",
+                "pg_auth_type": pg_auth_type,
+                "http_auth_type": http_auth_type,
+            }
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -768,7 +758,10 @@ class NeonEnv:
                     config_override=config.pageserver_config_override,
                 )
             )
+            cfg["pageservers"].append(ps_cfg)
+
         # Create config and a Safekeeper object for each safekeeper
+        cfg["safekeepers"] = []
         for i in range(1, config.num_safekeepers + 1):
             port = SafekeeperPort(
                 pg=self.port_distributor.get_port(),
@@ -776,32 +769,23 @@ class NeonEnv:
                 http=self.port_distributor.get_port(),
             )
             id = config.safekeepers_id_start + i  # assign ids sequentially
-            toml += textwrap.dedent(
-                f"""
-                [[safekeepers]]
-                id = {id}
-                pg_port = {port.pg}
-                pg_tenant_only_port = {port.pg_tenant_only}
-                http_port = {port.http}
-                sync = {'true' if config.safekeepers_enable_fsync else 'false'}"""
-            )
+            sk_cfg: Dict[str, Any] = {
+                "id": id,
+                "pg_port": port.pg,
+                "pg_tenant_only_port": port.pg_tenant_only,
+                "http_port": port.http,
+                "sync": config.safekeepers_enable_fsync,
+            }
             if config.auth_enabled:
-                toml += textwrap.dedent(
-                    """
-                auth_enabled = true
-                """
-                )
+                sk_cfg["auth_enabled"] = True
             if config.sk_remote_storage is not None:
-                toml += textwrap.dedent(
-                    f"""
-                remote_storage = "{remote_storage_to_toml_inline_table(config.sk_remote_storage)}"
-                """
-                )
+                sk_cfg["remote_storage"] = config.sk_remote_storage.to_toml_inline_table()
             safekeeper = Safekeeper(env=self, id=id, port=port)
             self.safekeepers.append(safekeeper)
+            cfg["safekeepers"].append(sk_cfg)
 
-        log.info(f"Config: {toml}")
-        self.neon_cli.init(toml)
+        log.info(f"Config: {cfg}")
+        self.neon_cli.init(cfg)
 
     def start(self):
         # Start up broker, pageserver and all safekeepers
@@ -1287,10 +1271,10 @@ class NeonCli(AbstractNeonCli):
 
     def init(
         self,
-        config_toml: str,
+        config: Dict[str, Any],
     ) -> "subprocess.CompletedProcess[str]":
         with tempfile.NamedTemporaryFile(mode="w+") as tmp:
-            tmp.write(config_toml)
+            tmp.write(toml.dumps(config))
             tmp.flush()
 
             cmd = ["init", f"--config={tmp.name}", "--pg-version", self.env.pg_version]
