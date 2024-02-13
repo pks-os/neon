@@ -3831,6 +3831,7 @@ async fn run_initdb(
         .args(["--pgdata", initdb_target_dir.as_ref()])
         .args(["--username", &conf.superuser])
         .args(["--encoding", "utf8"])
+        .args(["--locale", &conf.locale])
         .arg("--no-instructions")
         .arg("--no-sync")
         .env_clear()
