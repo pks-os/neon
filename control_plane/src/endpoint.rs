@@ -182,6 +182,7 @@ impl ComputeControlPlane {
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> Result<()> {
+        // TODO: It really feels like I need to do some protection here
         if matches!(mode, ComputeMode::Primary) {
             // this check is not complete, as you could have a concurrent attempt at
             // creating another primary, both reading the state before checking it here,
@@ -393,6 +394,7 @@ impl Endpoint {
                     conf.append("recovery_prefetch", "off");
                 }
             }
+            ComputeMode::Upgrade => {}
         }
 
         Ok(conf)
@@ -524,16 +526,19 @@ impl Endpoint {
         assert!(!pageserver_connstring.is_empty());
 
         let mut safekeeper_connstrings = Vec::new();
-        if self.mode == ComputeMode::Primary {
-            for sk_id in safekeepers {
-                let sk = self
-                    .env
-                    .safekeepers
-                    .iter()
-                    .find(|node| node.id == sk_id)
-                    .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
-                safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
+        match self.mode {
+            ComputeMode::Primary | ComputeMode::Upgrade => {
+                for sk_id in safekeepers {
+                    let sk = self
+                        .env
+                        .safekeepers
+                        .iter()
+                        .find(|node| node.id == sk_id)
+                        .ok_or_else(|| anyhow!("safekeeper {sk_id} does not exist"))?;
+                    safekeeper_connstrings.push(format!("127.0.0.1:{}", sk.get_compute_port()));
+                }
             }
+            _ => (),
         }
 
         // check for file remote_extensions_spec.json
@@ -618,13 +623,16 @@ impl Endpoint {
                 self.endpoint_path().join("spec.json").to_str().unwrap(),
             ])
             .args([
-                "--pgbin",
-                self.env
-                    .pg_bin_dir(self.pg_version)?
-                    .join("postgres")
-                    .to_str()
+                "--pgroot",
+                &self
+                    .env
+                    .pg_distrib_dir
+                    .clone()
+                    .into_os_string()
+                    .into_string()
                     .unwrap(),
             ])
+            .args(["--pgversion", &self.pg_version.to_string()])
             .stdin(std::process::Stdio::null())
             .stderr(logfile.try_clone()?)
             .stdout(logfile);
@@ -668,7 +676,7 @@ impl Endpoint {
                             }
                             // keep retrying
                         }
-                        ComputeStatus::Running => {
+                        ComputeStatus::Running | ComputeStatus::Prepared => {
                             // All good!
                             break;
                         }
@@ -682,6 +690,7 @@ impl Endpoint {
                             );
                         }
                         ComputeStatus::Empty
+                        | ComputeStatus::Upgrading
                         | ComputeStatus::ConfigurationPending
                         | ComputeStatus::Configuration
                         | ComputeStatus::TerminationPending

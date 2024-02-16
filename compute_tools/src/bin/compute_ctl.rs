@@ -44,7 +44,8 @@ use std::{thread, time::Duration};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use clap::Arg;
+use clap::{Arg, ArgAction};
+use compute_api::spec::ComputeMode;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info};
@@ -56,7 +57,6 @@ use compute_tools::compute::{
     forward_termination_signal, ComputeNode, ComputeState, ParsedSpec, PG_PID,
 };
 use compute_tools::configurator::launch_configurator;
-use compute_tools::extension_server::get_pg_version;
 use compute_tools::http::api::launch_http_server;
 use compute_tools::logger::*;
 use compute_tools::monitor::launch_monitor;
@@ -83,8 +83,12 @@ fn main() -> Result<()> {
     info!("build_tag: {build_tag}");
 
     let matches = cli().get_matches();
-    let pgbin_default = String::from("postgres");
-    let pgbin = matches.get_one::<String>("pgbin").unwrap_or(&pgbin_default);
+    let pgroot = matches
+        .get_one::<String>("pgroot")
+        .expect("pgroot is required");
+    let pgversion = matches
+        .get_one::<String>("pgversion")
+        .expect("pgversion is required");
 
     let ext_remote_storage = matches
         .get_one::<String>("remote-ext-config")
@@ -213,8 +217,8 @@ fn main() -> Result<()> {
     let compute_node = ComputeNode {
         connstr: Url::parse(connstr).context("cannot parse connstr as a URL")?,
         pgdata: pgdata.to_string(),
-        pgbin: pgbin.to_string(),
-        pgversion: get_pg_version(pgbin),
+        pgroot: pgroot.to_string(),
+        pgversion: pgversion.to_string(),
         live_config_allowed,
         state: Mutex::new(new_state),
         state_changed: Condvar::new(),
@@ -234,7 +238,7 @@ fn main() -> Result<()> {
 
     // Launch http service first, so we were able to serve control-plane
     // requests, while configuration is still in progress.
-    let _http_handle =
+    let http_handle =
         launch_http_server(http_port, &compute).expect("cannot launch http endpoint thread");
 
     let extension_server_port: u16 = http_port;
@@ -281,28 +285,6 @@ fn main() -> Result<()> {
     let _monitor_handle = launch_monitor(&compute);
     let _configurator_handle = launch_configurator(&compute);
 
-    // Start Postgres
-    let mut delay_exit = false;
-    let mut exit_code = None;
-    let pg = match compute.start_compute(extension_server_port) {
-        Ok(pg) => Some(pg),
-        Err(err) => {
-            error!("could not start the compute node: {:#}", err);
-            let mut state = compute.state.lock().unwrap();
-            state.error = Some(format!("{:?}", err));
-            state.status = ComputeStatus::Failed;
-            // Notify others that Postgres failed to start. In case of configuring the
-            // empty compute, it's likely that API handler is still waiting for compute
-            // state change. With this we will notify it that compute is in Failed state,
-            // so control plane will know about it earlier and record proper error instead
-            // of timeout.
-            compute.state_changed.notify_all();
-            drop(state); // unlock
-            delay_exit = true;
-            None
-        }
-    };
-
     // Start the vm-monitor if directed to. The vm-monitor only runs on linux
     // because it requires cgroups.
     cfg_if::cfg_if! {
@@ -347,25 +329,58 @@ fn main() -> Result<()> {
         }
     }
 
-    // Wait for the child Postgres process forever. In this state Ctrl+C will
-    // propagate to Postgres and it will be shut down as well.
-    if let Some((mut pg, logs_handle)) = pg {
-        // Startup is finished, exit the startup tracing span
-        drop(startup_context_guard);
+    // Prepare compute for Postgres start.
+    compute.prepare_compute(extension_server_port)?;
 
-        let ecode = pg
-            .wait()
-            .expect("failed to start waiting on Postgres process");
-        PG_PID.store(0, Ordering::SeqCst);
+    let mut delay_exit = false;
+    let mut exit_code = None;
+    match compute.get_mode() {
+        ComputeMode::Upgrade => {
+            // We will wait for someone to tell us to upgrade.
+            let _ = http_handle.join();
+        }
+        _ => {
+            // Start Postgres
+            let pg = match compute.start_compute() {
+                Ok(pg) => Some(pg),
+                Err(err) => {
+                    error!("could not start the compute node: {:#}", err);
+                    let mut state = compute.state.lock().unwrap();
+                    state.error = Some(format!("{:?}", err));
+                    state.status = ComputeStatus::Failed;
+                    // Notify others that Postgres failed to start. In case of configuring the
+                    // empty compute, it's likely that API handler is still waiting for compute
+                    // state change. With this we will notify it that compute is in Failed state,
+                    // so control plane will know about it earlier and record proper error instead
+                    // of timeout.
+                    compute.state_changed.notify_all();
+                    drop(state); // unlock
+                    delay_exit = true;
+                    None
+                }
+            };
 
-        // Process has exited, so we can join the logs thread.
-        let _ = logs_handle
-            .join()
-            .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+            // Wait for the child Postgres process forever. In this state Ctrl+C will
+            // propagate to Postgres and it will be shut down as well.
+            if let Some((mut pg, logs_handle)) = pg {
+                // Startup is finished, exit the startup tracing span
+                drop(startup_context_guard);
 
-        info!("Postgres exited with code {}, shutting down", ecode);
-        exit_code = ecode.code()
-    }
+                let ecode = pg
+                    .wait()
+                    .expect("failed to start waiting on Postgres process");
+                PG_PID.store(0, Ordering::SeqCst);
+
+                // Process has exited, so we can join the logs thread.
+                let _ = logs_handle
+                    .join()
+                    .map_err(|e| tracing::error!("log thread panicked: {:?}", e));
+
+                info!("Postgres exited with code {}, shutting down", ecode);
+                exit_code = ecode.code()
+            }
+        }
+    };
 
     // Terminate the vm_monitor so it releases the file watcher on
     // /sys/fs/cgroup/neon-postgres.
@@ -467,11 +482,17 @@ fn cli() -> clap::Command {
                 .required(true),
         )
         .arg(
-            Arg::new("pgbin")
-                .short('b')
-                .long("pgbin")
-                .default_value("postgres")
-                .value_name("POSTGRES_PATH"),
+            Arg::new("pgroot")
+                .short('R')
+                .long("pgroot")
+                .value_name("POSTGRES_ROOT")
+                .required(true),
+        )
+        .arg(
+            Arg::new("pgversion")
+                .long("pgversion")
+                .value_name("POSTGRES_VERSION")
+                .required(true),
         )
         .arg(
             Arg::new("spec")
@@ -525,6 +546,11 @@ fn cli() -> clap::Command {
                     "host=localhost port=5432 dbname=postgres user=cloud_admin sslmode=disable",
                 )
                 .value_name("FILECACHE_CONNSTR"),
+        )
+        .arg(
+            Arg::new("no-postgres")
+                .long("no-postgres")
+                .action(ArgAction::SetTrue),
         )
 }
 
