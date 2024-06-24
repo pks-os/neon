@@ -355,6 +355,7 @@ where
                 .await
                 .map_err(|e| BasebackupError::Server(e.into()))?
             {
+				info!("AUX file {}", path);
                 if path.starts_with("pg_replslot") {
                     let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                     let restart_lsn = Lsn(u64::from_le_bytes(
