@@ -806,6 +806,7 @@ pub fn handle_migrations(connstr: Url) -> Result<()> {
         Migration::Cluster(include_str!(
             "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
         )),
+        Migration::PerDatabase(include_str!("./migrations/0011-fix-CVE-2024-4317.sql")),
     ];
 
     MigrationRunner::new(connstr, &migrations)?.run_migrations()?;
