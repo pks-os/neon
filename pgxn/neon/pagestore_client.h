@@ -154,7 +154,10 @@ typedef struct
 typedef struct
 {
 	NeonMessageTag tag;
-	char		page[FLEXIBLE_ARRAY_MEMBER];
+	NRelFileInfo	rinfo;
+	ForkNumber		forknum;
+	BlockNumber 	blkno;
+	char			page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
 #define PS_GETPAGERESPONSE_SIZE (MAXALIGN(offsetof(NeonGetPageResponse, page) + BLCKSZ))

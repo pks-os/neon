@@ -1155,6 +1155,14 @@ nm_unpack_response(StringInfo s)
 
 				msg_resp = MemoryContextAllocZero(MyPState->bufctx, PS_GETPAGERESPONSE_SIZE);
 				msg_resp->tag = tag;
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					msg_resp->forknum = pq_getmsgbyte(s);
+					msg_resp->blkno = pq_getmsgint(s, 4);
+				}
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
 				pq_getmsgend(s);
@@ -2482,6 +2490,23 @@ Retry:
 	switch (resp->tag)
 	{
 		case T_NeonGetPageResponse:
+			if (neon_protocol_version >= 3)
+			{
+				NeonGetPageResponse* gpr = (NeonGetPageResponse *) resp;
+				if (!RelFileInfoEquals(gpr->rinfo, rinfo) ||
+					gpr->forknum != forkNum ||
+					gpr->blkno != blkno)
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_IO_ERROR),
+							 errmsg(NEON_TAG "[shard %d] got unxpected response for block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+									slot->shard_no,
+									blkno, RelFileInfoFmt(rinfo), forkNum,
+									LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
+							 errdetail("returns block %u in rel %u/%u/%u.%u",
+									   gpr->blkno, RelFileInfoFmt(gpr->rinfo), gpr->forknum)));
+				}
+			}
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
 			lfc_write(rinfo, forkNum, blkno, buffer);
 			break;

@@ -1093,6 +1093,7 @@ impl TryFrom<u8> for PagestreamBeMessageTag {
 pub enum PagestreamProtocolVersion {
     V1,
     V2,
+    V3,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1144,6 +1145,8 @@ pub struct PagestreamNblocksResponse {
 
 #[derive(Debug)]
 pub struct PagestreamGetPageResponse {
+    pub rel: RelTag,
+    pub blkno: u32,
     pub page: Bytes,
 }
 
@@ -1241,10 +1244,6 @@ impl PagestreamFeMessage {
         let msg_tag = body.read_u8()?;
 
         let (request_lsn, not_modified_since) = match protocol_version {
-            PagestreamProtocolVersion::V2 => (
-                Lsn::from(body.read_u64::<BigEndian>()?),
-                Lsn::from(body.read_u64::<BigEndian>()?),
-            ),
             PagestreamProtocolVersion::V1 => {
                 // In the old protocol, each message starts with a boolean 'latest' flag,
                 // followed by 'lsn'. Convert that to the two LSNs, 'request_lsn' and
@@ -1257,6 +1256,10 @@ impl PagestreamFeMessage {
                     (request_lsn, request_lsn) // get version at specified LSN
                 }
             }
+            _ => (
+                Lsn::from(body.read_u64::<BigEndian>()?),
+                Lsn::from(body.read_u64::<BigEndian>()?),
+            ),
         };
 
         // The rest of the messages are the same between V1 and V2
@@ -1311,7 +1314,7 @@ impl PagestreamFeMessage {
 }
 
 impl PagestreamBeMessage {
-    pub fn serialize(&self) -> Bytes {
+    pub fn serialize(&self, protocol_version: PagestreamProtocolVersion) -> Bytes {
         let mut bytes = BytesMut::new();
 
         use PagestreamBeMessageTag as Tag;
@@ -1328,7 +1331,19 @@ impl PagestreamBeMessage {
 
             Self::GetPage(resp) => {
                 bytes.put_u8(Tag::GetPage as u8);
-                bytes.put(&resp.page[..]);
+                match protocol_version {
+                    PagestreamProtocolVersion::V1 | PagestreamProtocolVersion::V2 => {
+                        bytes.put(&resp.page[..])
+                    }
+                    _ => {
+                        bytes.put_u32(resp.rel.spcnode);
+                        bytes.put_u32(resp.rel.dbnode);
+                        bytes.put_u32(resp.rel.relnode);
+                        bytes.put_u8(resp.rel.forknum);
+                        bytes.put_u32(resp.blkno);
+                        bytes.put(&resp.page[..])
+                    }
+                }
             }
 
             Self::Error(resp) => {
@@ -1369,9 +1384,20 @@ impl PagestreamBeMessage {
                     Self::Nblocks(PagestreamNblocksResponse { n_blocks })
                 }
                 Tag::GetPage => {
+                    let rel = RelTag {
+                        spcnode: buf.read_u32::<BigEndian>()?,
+                        dbnode: buf.read_u32::<BigEndian>()?,
+                        relnode: buf.read_u32::<BigEndian>()?,
+                        forknum: buf.read_u8()?,
+                    };
+                    let blkno = buf.read_u32::<BigEndian>()?;
                     let mut page = vec![0; 8192]; // TODO: use MaybeUninit
                     buf.read_exact(&mut page)?;
-                    PagestreamBeMessage::GetPage(PagestreamGetPageResponse { page: page.into() })
+                    PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+                        rel,
+                        blkno,
+                        page: page.into(),
+                    })
                 }
                 Tag::Error => {
                     let mut msg = Vec::new();

@@ -695,7 +695,9 @@ impl PageServerHandler {
             };
 
             // marshal & transmit response message
-            pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
+            pgb.write_message_noflush(&BeMessage::CopyData(
+                &response_msg.serialize(protocol_version),
+            ))?;
             tokio::select! {
                 biased;
                 _ = self.cancel.cancelled() => {
@@ -990,6 +992,8 @@ impl PageServerHandler {
             .await?;
 
         Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
+            rel: req.rel,
+            blkno: req.blkno,
             page,
         }))
     }
@@ -1272,6 +1276,35 @@ where
                 tenant_id,
                 timeline_id,
                 PagestreamProtocolVersion::V2,
+                ctx,
+            )
+            .await?;
+        } else if let Some(params) = parts.strip_prefix(&["pagestream_v3"]) {
+            if params.len() != 2 {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "invalid param number for pagestream command"
+                )));
+            }
+            let tenant_id = TenantId::from_str(params[0])
+                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
+            let timeline_id = TimelineId::from_str(params[1])
+                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
+
+            tracing::Span::current()
+                .record("tenant_id", field::display(tenant_id))
+                .record("timeline_id", field::display(timeline_id));
+
+            self.check_permission(Some(tenant_id))?;
+
+            COMPUTE_COMMANDS_COUNTERS
+                .for_command(ComputeCommandKind::PageStreamV3)
+                .inc();
+
+            self.handle_pagerequests(
+                pgb,
+                tenant_id,
+                timeline_id,
+                PagestreamProtocolVersion::V3,
                 ctx,
             )
             .await?;
