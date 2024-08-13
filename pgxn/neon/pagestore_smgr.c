@@ -1129,6 +1129,15 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonExistsResponse *msg_resp = palloc0(sizeof(NeonExistsResponse));
 
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					msg_resp->forknum = pq_getmsgbyte(s);
+					msg_resp->lsn = pq_getmsgint64(s);
+					msg_resp->not_modified_since = pq_getmsgint64(s);
+				}
 				msg_resp->tag = tag;
 				msg_resp->exists = pq_getmsgbyte(s);
 				pq_getmsgend(s);
@@ -1140,7 +1149,15 @@ nm_unpack_response(StringInfo s)
 		case T_NeonNblocksResponse:
 			{
 				NeonNblocksResponse *msg_resp = palloc0(sizeof(NeonNblocksResponse));
-
+				if (neon_protocol_version >= 3)
+				{
+					NInfoGetSpcOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetDbOid(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
+					msg_resp->forknum = pq_getmsgbyte(s);
+					msg_resp->lsn = pq_getmsgint64(s);
+					msg_resp->not_modified_since = pq_getmsgint64(s);
+				}
 				msg_resp->tag = tag;
 				msg_resp->n_blocks = pq_getmsgint(s, 4);
 				pq_getmsgend(s);
@@ -1162,6 +1179,8 @@ nm_unpack_response(StringInfo s)
 					NInfoGetRelNumber(msg_resp->rinfo) = pq_getmsgint(s, 4);
 					msg_resp->forknum = pq_getmsgbyte(s);
 					msg_resp->blkno = pq_getmsgint(s, 4);
+					msg_resp->lsn = pq_getmsgint64(s);
+					msg_resp->not_modified_since = pq_getmsgint64(s);
 				}
 				/* XXX:	should be varlena */
 				memcpy(msg_resp->page, pq_getmsgbytes(s, BLCKSZ), BLCKSZ);
@@ -1177,6 +1196,11 @@ nm_unpack_response(StringInfo s)
 			{
 				NeonDbSizeResponse *msg_resp = palloc0(sizeof(NeonDbSizeResponse));
 
+				if (neon_protocol_version >= 3)
+				{
+					msg_resp->lsn = pq_getmsgint64(s);
+					msg_resp->not_modified_since = pq_getmsgint64(s);
+				}
 				msg_resp->tag = tag;
 				msg_resp->db_size = pq_getmsgint64(s);
 				pq_getmsgend(s);
@@ -1936,6 +1960,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	}
 
 	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forkNum, REL_METADATA_PSEUDO_BLOCKNO);
+  Retry:
 	{
 		NeonExistsRequest request = {
 			.req.tag = T_NeonExistsRequest,
@@ -1951,9 +1976,28 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
 	switch (resp->tag)
 	{
 		case T_NeonExistsResponse:
-			exists = ((NeonExistsResponse *) resp)->exists;
+		{
+			NeonExistsResponse* rsp = (NeonExistsResponse *) resp;
+			if (!RelFileInfoEquals(rsp->rinfo, InfoFromSMgrRel(reln)) ||
+				rsp->forknum != forkNum ||
+				rsp->lsn != request_lsns.request_lsn ||
+				rsp->not_modified_since != request_lsns.not_modified_since)
+			{
+				ereport(LOG,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "got unxpected response for exists rel %u/%u/%u.%u from page server at lsn=%X/%08X, not_modified_since=%X/%X",
+								RelFileInfoFmt(InfoFromSMgrRel(reln)), forkNum,
+								LSN_FORMAT_ARGS(request_lsns.request_lsn),
+								LSN_FORMAT_ARGS(request_lsns.not_modified_since)),
+						 errdetail("returns exists rel %u/%u/%u.%u at lsn=%X/%X, not_modified_since=%X/%X",
+								   RelFileInfoFmt(rsp->rinfo), rsp->forknum,
+								   LSN_FORMAT_ARGS(rsp->lsn),
+								   LSN_FORMAT_ARGS(rsp->not_modified_since))));
+				goto Retry;
+			}
+			exists = rsp->exists;
 			break;
-
+		}
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
@@ -2492,19 +2536,25 @@ Retry:
 		case T_NeonGetPageResponse:
 			if (neon_protocol_version >= 3)
 			{
-				NeonGetPageResponse* gpr = (NeonGetPageResponse *) resp;
-				if (!RelFileInfoEquals(gpr->rinfo, rinfo) ||
-					gpr->forknum != forkNum ||
-					gpr->blkno != blkno)
+				NeonGetPageResponse* rsp = (NeonGetPageResponse *) resp;
+				if (!RelFileInfoEquals(rsp->rinfo, rinfo) ||
+					rsp->forknum != forkNum ||
+					rsp->blkno != blkno ||
+					rsp->lsn != slot->request_lsns.request_lsn ||
+					rsp->not_modified_since != slot->request_lsns.not_modified_since)
 				{
-					ereport(ERROR,
+					ereport(LOG,
 							(errcode(ERRCODE_IO_ERROR),
-							 errmsg(NEON_TAG "[shard %d] got unxpected response for block %u in rel %u/%u/%u.%u from page server at lsn %X/%08X",
+							 errmsg(NEON_TAG "[shard %d] got unxpected response for block %u in rel %u/%u/%u.%u from page server at lsn=%X/%08X, not_modified_since=%X/%X",
 									slot->shard_no,
 									blkno, RelFileInfoFmt(rinfo), forkNum,
-									LSN_FORMAT_ARGS(request_lsns.effective_request_lsn)),
-							 errdetail("returns block %u in rel %u/%u/%u.%u",
-									   gpr->blkno, RelFileInfoFmt(gpr->rinfo), gpr->forknum)));
+									LSN_FORMAT_ARGS(request_lsns.request_lsn),
+									LSN_FORMAT_ARGS(request_lsns.not_modified_since)),
+							 errdetail("returns block %u in rel %u/%u/%u.%u at lsn=%X/%X, not_modified_since=%X/%X",
+									   rsp->blkno, RelFileInfoFmt(rsp->rinfo), rsp->forknum,
+									   LSN_FORMAT_ARGS(rsp->lsn),
+									   LSN_FORMAT_ARGS(rsp->not_modified_since))));
+					goto Retry;
 				}
 			}
 			memcpy(buffer, ((NeonGetPageResponse *) resp)->page, BLCKSZ);
@@ -2766,6 +2816,7 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	}
 
 	request_lsns = neon_get_request_lsns(InfoFromSMgrRel(reln), forknum, REL_METADATA_PSEUDO_BLOCKNO);
+  Retry:
 	{
 		NeonNblocksRequest request = {
 			.req.tag = T_NeonNblocksRequest,
@@ -2781,9 +2832,28 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	switch (resp->tag)
 	{
 		case T_NeonNblocksResponse:
-			n_blocks = ((NeonNblocksResponse *) resp)->n_blocks;
+		{
+			NeonNblocksResponse * rsp  = (NeonNblocksResponse*) resp;
+			if (!RelFileInfoEquals(rsp->rinfo, InfoFromSMgrRel(reln)) ||
+				rsp->forknum != forknum ||
+				rsp->lsn != request_lsns.request_lsn ||
+				rsp->not_modified_since != request_lsns.not_modified_since)
+			{
+				ereport(LOG,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "got unxpected response for number of blocks in rel %u/%u/%u.%u from page server at lsn=%X/%08X, not_modified_since=%X/%X",
+								RelFileInfoFmt(InfoFromSMgrRel(reln)), forknum,
+								LSN_FORMAT_ARGS(request_lsns.request_lsn),
+								LSN_FORMAT_ARGS(request_lsns.not_modified_since)),
+						 errdetail("returns number of blocks for rel %u/%u/%u.%u at lsn=%X/%X, not_modified_since=%X/%X",
+								   RelFileInfoFmt(rsp->rinfo), rsp->forknum,
+								   LSN_FORMAT_ARGS(rsp->lsn),
+								   LSN_FORMAT_ARGS(rsp->not_modified_since))));
+				goto Retry;
+			}
+			n_blocks = rsp->n_blocks;
 			break;
-
+		}
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),
@@ -2824,6 +2894,7 @@ neon_dbsize(Oid dbNode)
 	NRelFileInfo dummy_node = {0};
 
 	request_lsns = neon_get_request_lsns(dummy_node, MAIN_FORKNUM, REL_METADATA_PSEUDO_BLOCKNO);
+  Retry:
 	{
 		NeonDbSizeRequest request = {
 			.req.tag = T_NeonDbSizeRequest,
@@ -2838,9 +2909,24 @@ neon_dbsize(Oid dbNode)
 	switch (resp->tag)
 	{
 		case T_NeonDbSizeResponse:
-			db_size = ((NeonDbSizeResponse *) resp)->db_size;
+		{
+			NeonDbSizeResponse* rsp = (NeonDbSizeResponse *) resp;
+			if (rsp->lsn != request_lsns.request_lsn ||
+				rsp->not_modified_since != request_lsns.not_modified_since)
+			{
+				ereport(LOG,
+						(errcode(ERRCODE_IO_ERROR),
+						 errmsg(NEON_TAG "got unxpected response for db size from page server at lsn=%X/%08X, not_modified_since=%X/%X",
+								LSN_FORMAT_ARGS(request_lsns.request_lsn),
+								LSN_FORMAT_ARGS(request_lsns.not_modified_since)),
+						 errdetail("returns db size at lsn=%X/%X, not_modified_since=%X/%X",
+								   LSN_FORMAT_ARGS(rsp->lsn),
+								   LSN_FORMAT_ARGS(rsp->not_modified_since))));
+				goto Retry;
+			}
+			db_size = rsp->db_size;
 			break;
-
+		}
 		case T_NeonErrorResponse:
 			ereport(ERROR,
 					(errcode(ERRCODE_IO_ERROR),

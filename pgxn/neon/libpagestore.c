@@ -1065,7 +1065,7 @@ pg_init_libpagestore(void)
 							"Version of compute<->page server protocol",
 							NULL,
 							&neon_protocol_version,
-							3, /* use protocol version 2 */
+							3, /* use protocol version 3 */
 							1, /* min */
 							3, /* max */
 							PGC_SU_BACKEND,

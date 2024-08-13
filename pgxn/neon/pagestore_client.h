@@ -141,22 +141,32 @@ typedef struct
 
 typedef struct
 {
-	NeonMessageTag tag;
-	bool		exists;
+	NeonMessageTag 	tag;
+	NRelFileInfo	rinfo;
+	ForkNumber		forknum;
+	XLogRecPtr		lsn;
+	XLogRecPtr		not_modified_since;
+	bool			exists;
 } NeonExistsResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
-	uint32		n_blocks;
+	NeonMessageTag	tag;
+	NRelFileInfo	rinfo;
+	ForkNumber		forknum;
+	XLogRecPtr		lsn;
+	XLogRecPtr		not_modified_since;
+	uint32			n_blocks;
 } NeonNblocksResponse;
 
 typedef struct
 {
-	NeonMessageTag tag;
+	NeonMessageTag	tag;
 	NRelFileInfo	rinfo;
 	ForkNumber		forknum;
-	BlockNumber 	blkno;
+	BlockNumber		blkno;
+	XLogRecPtr		lsn;
+	XLogRecPtr		not_modified_since;
 	char			page[FLEXIBLE_ARRAY_MEMBER];
 } NeonGetPageResponse;
 
@@ -164,8 +174,10 @@ typedef struct
 
 typedef struct
 {
-	NeonMessageTag tag;
-	int64		db_size;
+	NeonMessageTag 	tag;
+	XLogRecPtr		lsn;
+	XLogRecPtr		not_modified_since;
+	int64			db_size;
 } NeonDbSizeResponse;
 
 typedef struct

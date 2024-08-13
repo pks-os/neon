@@ -1135,11 +1135,17 @@ pub struct PagestreamGetSlruSegmentRequest {
 
 #[derive(Debug)]
 pub struct PagestreamExistsResponse {
+    pub rel: RelTag,
+    pub lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub exists: bool,
 }
 
 #[derive(Debug)]
 pub struct PagestreamNblocksResponse {
+    pub rel: RelTag,
+    pub lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub n_blocks: u32,
 }
 
@@ -1147,6 +1153,8 @@ pub struct PagestreamNblocksResponse {
 pub struct PagestreamGetPageResponse {
     pub rel: RelTag,
     pub blkno: u32,
+    pub lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub page: Bytes,
 }
 
@@ -1162,6 +1170,8 @@ pub struct PagestreamErrorResponse {
 
 #[derive(Debug)]
 pub struct PagestreamDbSizeResponse {
+    pub lsn: Lsn,
+    pub not_modified_since: Lsn,
     pub db_size: i64,
 }
 
@@ -1256,7 +1266,7 @@ impl PagestreamFeMessage {
                     (request_lsn, request_lsn) // get version at specified LSN
                 }
             }
-            _ => (
+            PagestreamProtocolVersion::V2 | PagestreamProtocolVersion::V3 => (
                 Lsn::from(body.read_u64::<BigEndian>()?),
                 Lsn::from(body.read_u64::<BigEndian>()?),
             ),
@@ -1321,12 +1331,38 @@ impl PagestreamBeMessage {
         match self {
             Self::Exists(resp) => {
                 bytes.put_u8(Tag::Exists as u8);
-                bytes.put_u8(resp.exists as u8);
+                match protocol_version {
+                    PagestreamProtocolVersion::V1 | PagestreamProtocolVersion::V2 => {
+                        bytes.put_u8(resp.exists as u8);
+                    }
+                    PagestreamProtocolVersion::V3 => {
+                        bytes.put_u32(resp.rel.spcnode);
+                        bytes.put_u32(resp.rel.dbnode);
+                        bytes.put_u32(resp.rel.relnode);
+                        bytes.put_u8(resp.rel.forknum);
+                        bytes.put_u64(resp.lsn.0);
+                        bytes.put_u64(resp.not_modified_since.0);
+                        bytes.put_u8(resp.exists as u8);
+                    }
+                }
             }
 
             Self::Nblocks(resp) => {
                 bytes.put_u8(Tag::Nblocks as u8);
-                bytes.put_u32(resp.n_blocks);
+                match protocol_version {
+                    PagestreamProtocolVersion::V1 | PagestreamProtocolVersion::V2 => {
+                        bytes.put_u32(resp.n_blocks);
+                    }
+                    PagestreamProtocolVersion::V3 => {
+                        bytes.put_u32(resp.rel.spcnode);
+                        bytes.put_u32(resp.rel.dbnode);
+                        bytes.put_u32(resp.rel.relnode);
+                        bytes.put_u8(resp.rel.forknum);
+                        bytes.put_u64(resp.lsn.0);
+                        bytes.put_u64(resp.not_modified_since.0);
+                        bytes.put_u32(resp.n_blocks);
+                    }
+                }
             }
 
             Self::GetPage(resp) => {
@@ -1335,12 +1371,14 @@ impl PagestreamBeMessage {
                     PagestreamProtocolVersion::V1 | PagestreamProtocolVersion::V2 => {
                         bytes.put(&resp.page[..])
                     }
-                    _ => {
+                    PagestreamProtocolVersion::V3 => {
                         bytes.put_u32(resp.rel.spcnode);
                         bytes.put_u32(resp.rel.dbnode);
                         bytes.put_u32(resp.rel.relnode);
                         bytes.put_u8(resp.rel.forknum);
                         bytes.put_u32(resp.blkno);
+                        bytes.put_u64(resp.lsn.0);
+                        bytes.put_u64(resp.not_modified_since.0);
                         bytes.put(&resp.page[..])
                     }
                 }
@@ -1353,7 +1391,16 @@ impl PagestreamBeMessage {
             }
             Self::DbSize(resp) => {
                 bytes.put_u8(Tag::DbSize as u8);
-                bytes.put_i64(resp.db_size);
+                match protocol_version {
+                    PagestreamProtocolVersion::V1 | PagestreamProtocolVersion::V2 => {
+                        bytes.put_i64(resp.db_size);
+                    }
+                    PagestreamProtocolVersion::V3 => {
+                        bytes.put_u64(resp.lsn.0);
+                        bytes.put_u64(resp.not_modified_since.0);
+                        bytes.put_i64(resp.db_size);
+                    }
+                }
             }
 
             Self::GetSlruSegment(resp) => {
@@ -1374,14 +1421,38 @@ impl PagestreamBeMessage {
         let ok =
             match Tag::try_from(msg_tag).map_err(|tag: u8| anyhow::anyhow!("invalid tag {tag}"))? {
                 Tag::Exists => {
+                    let rel = RelTag {
+                        spcnode: buf.read_u32::<BigEndian>()?,
+                        dbnode: buf.read_u32::<BigEndian>()?,
+                        relnode: buf.read_u32::<BigEndian>()?,
+                        forknum: buf.read_u8()?,
+                    };
+                    let lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
                     let exists = buf.read_u8()?;
                     Self::Exists(PagestreamExistsResponse {
+                        rel,
+                        lsn,
+                        not_modified_since,
                         exists: exists != 0,
                     })
                 }
                 Tag::Nblocks => {
+                    let rel = RelTag {
+                        spcnode: buf.read_u32::<BigEndian>()?,
+                        dbnode: buf.read_u32::<BigEndian>()?,
+                        relnode: buf.read_u32::<BigEndian>()?,
+                        forknum: buf.read_u8()?,
+                    };
+                    let lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
                     let n_blocks = buf.read_u32::<BigEndian>()?;
-                    Self::Nblocks(PagestreamNblocksResponse { n_blocks })
+                    Self::Nblocks(PagestreamNblocksResponse {
+                        rel,
+                        lsn,
+                        not_modified_since,
+                        n_blocks,
+                    })
                 }
                 Tag::GetPage => {
                     let rel = RelTag {
@@ -1391,11 +1462,15 @@ impl PagestreamBeMessage {
                         forknum: buf.read_u8()?,
                     };
                     let blkno = buf.read_u32::<BigEndian>()?;
+                    let lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
                     let mut page = vec![0; 8192]; // TODO: use MaybeUninit
                     buf.read_exact(&mut page)?;
                     PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
                         rel,
                         blkno,
+                        lsn,
+                        not_modified_since,
                         page: page.into(),
                     })
                 }
@@ -1409,8 +1484,14 @@ impl PagestreamBeMessage {
                     })
                 }
                 Tag::DbSize => {
+                    let lsn = Lsn(buf.read_u64::<BigEndian>()?);
+                    let not_modified_since = Lsn(buf.read_u64::<BigEndian>()?);
                     let db_size = buf.read_i64::<BigEndian>()?;
-                    Self::DbSize(PagestreamDbSizeResponse { db_size })
+                    Self::DbSize(PagestreamDbSizeResponse {
+                        lsn,
+                        not_modified_since,
+                        db_size,
+                    })
                 }
                 Tag::GetSlruSegment => {
                     let n_blocks = buf.read_u32::<BigEndian>()?;
