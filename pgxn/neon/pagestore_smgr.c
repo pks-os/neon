@@ -2837,9 +2837,9 @@ neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 	{
 		case T_NeonNblocksResponse:
 		{
+			NeonNblocksResponse * rsp  = (NeonNblocksResponse*) resp;
 			if (neon_protocol_version >= 3)
 			{
-				NeonNblocksResponse * rsp  = (NeonNblocksResponse*) resp;
 				if (!RelFileInfoEquals(rsp->rinfo, InfoFromSMgrRel(reln)) ||
 					rsp->forknum != forknum ||
 					rsp->lsn != request_lsns.request_lsn ||
