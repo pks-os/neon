@@ -892,6 +892,30 @@ COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compu
 
 #########################################################################################
 #
+# Compile the Neon-specific `local_proxy` binary
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS local-proxy
+ARG BUILD_TAG
+ENV BUILD_TAG=$BUILD_TAG
+
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
+
+#########################################################################################
+#
+# Final local-proxy image
+#
+#########################################################################################
+
+FROM debian:bullseye-slim AS local-proxy-image
+
+COPY --from=local-proxy /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local-proxy
+
+#########################################################################################
+#
 # Clean up postgres folder before inclusion
 #
 #########################################################################################
@@ -994,6 +1018,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=local-proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local-proxy
 
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
