@@ -136,9 +136,7 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer
-                            .put_image_with_discard_fn(key, img.clone(), tline, ctx, discard)
-                            .await?;
+                        image_writer.put_image(key, img.clone(), tline, ctx).await?;
                     } else {
                         delta_writer
                             .put_value_with_discard_fn(
@@ -2127,8 +2125,7 @@ impl Timeline {
                     .finish_with_discard_fn(self, ctx, hack_end_key, discard)
                     .await?
             } else {
-                let (layers, _) = writer.take()?;
-                assert!(layers.is_empty(), "image layers produced in dry run mode?");
+                writer.discard();
                 Vec::new()
             }
         } else {
