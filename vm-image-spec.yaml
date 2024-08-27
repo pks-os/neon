@@ -18,7 +18,7 @@ commands:
   - name: local-proxy
     user: postgres
     sysvInitAction: respawn
-    shell: '/usr/local/bin/local_proxy --config /etc/localproxy.json --http 0.0.0.0:7432'
+    shell: '/usr/local/bin/local-proxy --config /etc/localproxy.json --http 0.0.0.0:7432'
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
