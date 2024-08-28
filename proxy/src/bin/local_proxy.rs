@@ -6,9 +6,9 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, ensure};
+use anyhow::{bail, ensure, Context};
 use dashmap::DashMap;
-use futures::{future::Either, FutureExt};
+use futures::future::Either;
 use proxy::{
     auth::backend::local::{JwksRoleSettings, LocalBackend, JWKS_ROLE_MAP},
     cancellation::CancellationHandlerMain,
@@ -25,7 +25,7 @@ project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
@@ -75,6 +75,9 @@ struct LocalProxyCliArgs {
     /// File address of the local proxy config file
     #[clap(long, default_value = "./localproxy.json")]
     config_path: PathBuf,
+    /// File address of the local proxy config file
+    #[clap(long, default_value = "./localproxy.pid")]
+    pid_path: PathBuf,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -133,12 +136,28 @@ async fn main() -> anyhow::Result<()> {
         16,
     ));
 
-    refresh_config(args.config_path.clone()).await;
+    // write the process ID to a file so that compute-ctl can find our process later
+    // in order to trigger the appropriate SIGHUP on config change.
+    let pid = nix::unistd::getpid();
+    info!("process running in PID {pid}");
+    std::fs::write(args.pid_path, format!("{pid}\n")).context("writing PID to file")?;
 
     let mut maintenance_tasks = JoinSet::new();
+
+    let refresh_config_notify = Arc::new(Notify::new());
+    let refresh_config_notify2 = Arc::clone(&refresh_config_notify);
     maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), move || {
-        refresh_config(args.config_path.clone()).map(Ok)
+        refresh_config_notify2.notify_one();
     }));
+
+    // trigger the first config load **after** setting up the signal hook
+    // to avoid the race condition where:
+    // 1. No config file registered when local-proxy starts up
+    // 2. The config file is written but the signal hook is not yet received
+    // 3. local-proxy completes startup but has no config loaded, despite there being a registerd config.
+    refresh_config_notify.notify_one();
+    tokio::spawn(refresh_config_loop(args.config_path, refresh_config_notify));
+
     maintenance_tasks.spawn(proxy::http::health_server::task_main(
         metrics_listener,
         AppMetrics {
@@ -236,11 +255,15 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     })))
 }
 
-async fn refresh_config(path: PathBuf) {
-    match refresh_config_inner(&path).await {
-        Ok(()) => {}
-        Err(e) => {
-            error!(error=?e, ?path, "could not read config file");
+async fn refresh_config_loop(path: PathBuf, rx: Arc<Notify>) {
+    loop {
+        rx.notified().await;
+
+        match refresh_config_inner(&path).await {
+            Ok(()) => {}
+            Err(e) => {
+                error!(error=?e, ?path, "could not read config file");
+            }
         }
     }
 }
@@ -305,6 +328,7 @@ async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
     }
 
     if let Some((project_id, branch_id)) = settings {
+        info!("successfully loaded new config");
         JWKS_ROLE_MAP.store(Some(Arc::new(JwksRoleSettings {
             roles: data.roles,
             project_id,

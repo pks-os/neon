@@ -909,66 +909,114 @@ impl ComputeNode {
     pub fn reconfigure(&self) -> Result<()> {
         let spec = self.state.lock().unwrap().pspec.clone().unwrap().spec;
 
-        if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
-            info!("tuning pgbouncer");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create rt");
 
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed to create rt");
+        std::thread::scope(|s| -> Result<()> {
+            if let Some(ref pgbouncer_settings) = spec.pgbouncer_settings {
+                info!("tuning pgbouncer");
 
-            // Spawn a thread to do the tuning,
-            // so that we don't block the main thread that starts Postgres.
-            let pgbouncer_settings = pgbouncer_settings.clone();
-            let _handle = thread::spawn(move || {
-                let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
-                if let Err(err) = res {
-                    error!("error while tuning pgbouncer: {err:?}");
-                }
-            });
-        }
-
-        // Write new config
-        let pgdata_path = Path::new(&self.pgdata);
-        let postgresql_conf_path = pgdata_path.join("postgresql.conf");
-        config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
-        // temporarily reset max_cluster_size in config
-        // to avoid the possibility of hitting the limit, while we are reconfiguring:
-        // creating new extensions, roles, etc...
-        config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
-            self.pg_reload_conf()?;
-
-            let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
-
-            // Proceed with post-startup configuration. Note, that order of operations is important.
-            // Disable DDL forwarding because control plane already knows about these roles/databases.
-            if spec.mode == ComputeMode::Primary {
-                client.simple_query("SET neon.forward_ddl = false")?;
-                cleanup_instance(&mut client)?;
-                handle_roles(&spec, &mut client)?;
-                handle_databases(&spec, &mut client)?;
-                handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
-                handle_grants(
-                    &spec,
-                    &mut client,
-                    self.connstr.as_str(),
-                    self.has_feature(ComputeFeature::AnonExtension),
-                )?;
-                handle_extensions(&spec, &mut client)?;
-                handle_extension_neon(&mut client)?;
-                // We can skip handle_migrations here because a new migration can only appear
-                // if we have a new version of the compute_ctl binary, which can only happen
-                // if compute got restarted, in which case we'll end up inside of apply_config
-                // instead of reconfigure.
+                // Spawn a thread to do the tuning,
+                // so that we don't block the main thread that starts Postgres.
+                let pgbouncer_settings = pgbouncer_settings.clone();
+                let _handle = s.spawn(move || {
+                    let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
+                    if let Err(err) = res {
+                        error!("error while tuning pgbouncer: {err:?}");
+                    }
+                });
             }
 
-            // 'Close' connection
-            drop(client);
+            let mut local_proxy_handle = None;
+            if let Some(ref local_proxy) = spec.local_proxy_config {
+                info!("configuring local-proxy");
+
+                // Spawn a thread to do the configuration,
+                // so that we don't block the main thread that starts Postgres.
+                let local_proxy = local_proxy.clone();
+                local_proxy_handle = Some(s.spawn(move || -> Result<()> {
+                    let config = serde_json::to_string_pretty(&local_proxy)
+                        .context("serializing local-proxy json")?;
+                    std::fs::write("/etc/localproxy.json", config)
+                        .context("writing localproxy.json")?;
+
+                    // retry a few times just in case.
+                    for _ in 0..5 {
+                        match std::fs::read_to_string("/etc/localproxy.pid") {
+                            // newline byte to ensure it was not partially written
+                            Ok(pid) if pid.ends_with('\n') => {
+                                match pid.trim().parse() {
+                                    Ok(pid) => {
+                                        let pid = Pid::from_raw(pid);
+                                        nix::sys::signal::kill(pid, Signal::SIGHUP).context("sending signal to local-proxy")?;
+                                        return Ok(())
+                                    },
+                                    Err(e) => warn!(error=?e,"localproxy process ID file could not be parsed."),
+                                }
+                            }
+                            Ok(_) => warn!("localproxy process ID file could not be parsed."),
+                            Err(e) => warn!(error=?e,"localproxy process ID file could not be read."),
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+
+                    Ok(())
+                }));
+            }
+
+            // Write new config
+            let pgdata_path = Path::new(&self.pgdata);
+            let postgresql_conf_path = pgdata_path.join("postgresql.conf");
+            config::write_postgres_conf(&postgresql_conf_path, &spec, None)?;
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are reconfiguring:
+            // creating new extensions, roles, etc...
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+                self.pg_reload_conf()?;
+
+                let mut client = Client::connect(self.connstr.as_str(), NoTls)?;
+
+                // Proceed with post-startup configuration. Note, that order of operations is important.
+                // Disable DDL forwarding because control plane already knows about these roles/databases.
+                if spec.mode == ComputeMode::Primary {
+                    client.simple_query("SET neon.forward_ddl = false")?;
+                    cleanup_instance(&mut client)?;
+                    handle_roles(&spec, &mut client)?;
+                    handle_databases(&spec, &mut client)?;
+                    handle_role_deletions(&spec, self.connstr.as_str(), &mut client)?;
+                    handle_grants(
+                        &spec,
+                        &mut client,
+                        self.connstr.as_str(),
+                        self.has_feature(ComputeFeature::AnonExtension),
+                    )?;
+                    handle_extensions(&spec, &mut client)?;
+                    handle_extension_neon(&mut client)?;
+                    // We can skip handle_migrations here because a new migration can only appear
+                    // if we have a new version of the compute_ctl binary, which can only happen
+                    // if compute got restarted, in which case we'll end up inside of apply_config
+                    // instead of reconfigure.
+                }
+
+                // 'Close' connection
+                drop(client);
+
+                Ok(())
+            })?;
+
+            self.pg_reload_conf()?;
+
+            if let Some(handle) = local_proxy_handle {
+                match handle.join() {
+                    Ok(res) => res?,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
 
             Ok(())
         })?;
-
-        self.pg_reload_conf()?;
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);

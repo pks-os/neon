@@ -96,6 +96,8 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
+
+    pub local_proxy_config: Option<LocalProxySpec>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -267,6 +269,22 @@ pub struct GenericOption {
 /// Optional collection of `GenericOption`'s. Type alias allows us to
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LocalProxySpec {
+    pub jwks: Vec<JwksSettings>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JwksSettings {
+    pub id: String,
+    pub role_name: String,
+    pub project_id: String,
+    pub branch_id: String,
+    pub jwks_url: String,
+    pub provider_name: String,
+    pub jwt_audience: Option<String>,
+}
 
 #[cfg(test)]
 mod tests {
