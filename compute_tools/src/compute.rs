@@ -33,6 +33,8 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::config::notify_local_proxy;
+use crate::config::write_local_proxy_conf;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -878,6 +880,13 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local-proxy");
+
+            write_local_proxy_conf("/etc/localproxy.json".as_ref(), local_proxy)?;
+            notify_local_proxy("/etc/localproxy.pid".as_ref())?;
+        }
+
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
             let mut connstr = connstr.clone();
@@ -936,31 +945,8 @@ impl ComputeNode {
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
             local_proxy_handle = Some(thread::spawn(move || -> Result<()> {
-                let config = serde_json::to_string_pretty(&local_proxy)
-                    .context("serializing local-proxy json")?;
-                std::fs::write("/etc/localproxy.json", config)
-                    .context("writing localproxy.json")?;
-
-                // retry a few times just in case.
-                for _ in 0..5 {
-                    match std::fs::read_to_string("/etc/localproxy.pid") {
-                        // newline byte to ensure it was not partially written
-                        Ok(pid) if pid.ends_with('\n') => match pid.trim().parse() {
-                            Ok(pid) => {
-                                let pid = Pid::from_raw(pid);
-                                nix::sys::signal::kill(pid, Signal::SIGHUP)
-                                    .context("sending signal to local-proxy")?;
-                                return Ok(());
-                            }
-                            Err(e) => {
-                                warn!(error=?e,"localproxy process ID file could not be parsed.")
-                            }
-                        },
-                        Ok(_) => warn!("localproxy process ID file could not be parsed."),
-                        Err(e) => warn!(error=?e,"localproxy process ID file could not be read."),
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
+                write_local_proxy_conf("/etc/localproxy.json".as_ref(), &local_proxy)?;
+                notify_local_proxy("/etc/localproxy.pid".as_ref())?;
 
                 Ok(())
             }));

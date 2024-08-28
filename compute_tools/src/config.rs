@@ -3,11 +3,14 @@ use std::io;
 use std::io::prelude::*;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use nix::sys::signal::Signal;
+use nix::unistd::Pid;
+use tracing::warn;
 
 use crate::pg_helpers::escape_conf_value;
 use crate::pg_helpers::{GenericOptionExt, PgOptionsSerialize};
-use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption};
+use compute_api::spec::{ComputeMode, ComputeSpec, GenericOption, LocalProxySpec};
 
 /// Check that `line` is inside a text file and put it there if it is not.
 /// Create file if it doesn't exist.
@@ -138,4 +141,39 @@ where
     file.set_len(0)?;
 
     res
+}
+
+/// Create or completely rewrite configuration file specified by `path`
+pub fn write_local_proxy_conf(path: &Path, local_proxy: &LocalProxySpec) -> Result<()> {
+    let config =
+        serde_json::to_string_pretty(local_proxy).context("serializing local-proxy json")?;
+    std::fs::write(path, config).context("writing localproxy.json")?;
+
+    Ok(())
+}
+
+/// Notify local proxy about a new config file.
+pub fn notify_local_proxy(path: &Path) -> Result<()> {
+    // retry a few times just in case.
+    for _ in 0..5 {
+        match std::fs::read_to_string(path) {
+            // newline byte to ensure it was not partially written
+            Ok(pid) if pid.ends_with('\n') => match pid.trim().parse() {
+                Ok(pid) => {
+                    let pid = Pid::from_raw(pid);
+                    nix::sys::signal::kill(pid, Signal::SIGHUP)
+                        .context("sending signal to local-proxy")?;
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(error=?e,"localproxy process ID file could not be parsed.")
+                }
+            },
+            Ok(_) => warn!("localproxy process ID file could not be parsed."),
+            Err(e) => warn!(error=?e,"localproxy process ID file could not be read."),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    Ok(())
 }
