@@ -278,9 +278,7 @@ pub struct LocalProxySpec {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JwksSettings {
     pub id: String,
-    pub role_name: String,
-    pub project_id: String,
-    pub branch_id: String,
+    pub role_names: Vec<String>,
     pub jwks_url: String,
     pub provider_name: String,
     pub jwt_audience: Option<String>,

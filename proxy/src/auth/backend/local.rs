@@ -9,7 +9,7 @@ use crate::{
         messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
-    intern::{BranchIdInt, BranchIdTag, EndpointIdTag, InternId, ProjectIdInt, ProjectIdTag},
+    intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
     RoleName,
 };
 
@@ -54,8 +54,6 @@ pub static JWKS_ROLE_MAP: ArcSwapOption<JwksRoleSettings> = ArcSwapOption::const
 #[derive(Debug, Clone)]
 pub struct JwksRoleSettings {
     pub roles: HashMap<RoleName, EndpointJwksResponse>,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
 }
 
 impl FetchAuthRules for StaticAuthRules {

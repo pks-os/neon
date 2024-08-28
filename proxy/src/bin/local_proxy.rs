@@ -1,24 +1,31 @@
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::pin,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{bail, ensure, Context};
+use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
 use futures::future::Either;
 use proxy::{
     auth::backend::local::{JwksRoleSettings, LocalBackend, JWKS_ROLE_MAP},
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
-    console::{locks::ApiLocks, messages::JwksRoleMapping},
+    console::{
+        locks::ApiLocks,
+        messages::{EndpointJwksResponse, JwksSettings},
+    },
     http::health_server::AppMetrics,
     metrics::{Metrics, ThreadPoolMetrics},
     rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
     scram::threadpool::ThreadPool,
     serverless::{self, cancel_set::CancelSet, GlobalConnPoolOptions},
+    RoleName,
 };
 
 project_git_version!(GIT_VERSION);
@@ -270,71 +277,69 @@ async fn refresh_config_loop(path: PathBuf, rx: Arc<Notify>) {
 
 async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
     let bytes = tokio::fs::read(&path).await?;
-    let mut data: JwksRoleMapping = serde_json::from_slice(&bytes)?;
+    let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
 
-    let mut settings = None;
+    let mut roles = HashMap::<RoleName, EndpointJwksResponse>::new();
 
-    for mapping in data.roles.values_mut() {
-        for jwks in &mut mapping.jwks {
-            ensure!(
-                jwks.jwks_url.has_authority()
-                    && (jwks.jwks_url.scheme() == "http" || jwks.jwks_url.scheme() == "https"),
-                "Invalid JWKS url. Must be HTTP",
-            );
+    for jwks in data.jwks {
+        let mut jwks_url = url::Url::from_str(&jwks.jwks_url).context("parsing JWKS url")?;
 
-            ensure!(
-                jwks.jwks_url
-                    .host()
-                    .is_some_and(|h| h != url::Host::Domain("")),
-                "Invalid JWKS url. No domain listed",
-            );
+        ensure!(
+            jwks_url.has_authority()
+                && (jwks_url.scheme() == "http" || jwks_url.scheme() == "https"),
+            "Invalid JWKS url. Must be HTTP",
+        );
 
-            // clear username, password and ports
-            jwks.jwks_url.set_username("").expect(
+        ensure!(
+            jwks_url.host().is_some_and(|h| h != url::Host::Domain("")),
+            "Invalid JWKS url. No domain listed",
+        );
+
+        // clear username, password and ports
+        jwks_url
+            .set_username("")
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        jwks_url
+            .set_password(None)
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        // local testing is hard if we need to have a specific restricted port
+        if cfg!(not(feature = "testing")) {
+            jwks_url.set_port(None).expect(
                 "url can be a base and has a valid host and is not a file. should not error",
             );
-            jwks.jwks_url.set_password(None).expect(
-                "url can be a base and has a valid host and is not a file. should not error",
-            );
-            // local testing is hard if we need to have a specific restricted port
+        }
+
+        // clear query params
+        jwks_url.set_fragment(None);
+        jwks_url.query_pairs_mut().clear().finish();
+
+        if jwks_url.scheme() != "https" {
+            // local testing is hard if we need to set up https support.
             if cfg!(not(feature = "testing")) {
-                jwks.jwks_url.set_port(None).expect(
-                    "url can be a base and has a valid host and is not a file. should not error",
-                );
+                jwks_url
+                    .set_scheme("https")
+                    .expect("should not error to set the scheme to https if it was http");
+            } else {
+                warn!(scheme = jwks_url.scheme(), "JWKS url is not HTTPS");
             }
+        }
 
-            // clear query params
-            jwks.jwks_url.set_fragment(None);
-            jwks.jwks_url.query_pairs_mut().clear().finish();
-
-            if jwks.jwks_url.scheme() != "https" {
-                // local testing is hard if we need to set up https support.
-                if cfg!(not(feature = "testing")) {
-                    jwks.jwks_url
-                        .set_scheme("https")
-                        .expect("should not error to set the scheme to https if it was http");
-                } else {
-                    warn!(scheme = jwks.jwks_url.scheme(), "JWKS url is not HTTPS");
-                }
-            }
-
-            let (pr, br) = settings.get_or_insert((jwks.project_id, jwks.branch_id));
-            ensure!(
-                *pr == jwks.project_id,
-                "inconsistent project IDs configured"
-            );
-            ensure!(*br == jwks.branch_id, "inconsistent branch IDs configured");
+        for role in jwks.role_names {
+            roles
+                .entry(RoleName::from(&role))
+                .or_default()
+                .jwks
+                .push(JwksSettings {
+                    id: jwks.id.clone(),
+                    jwks_url: jwks_url.clone(),
+                    provider_name: jwks.provider_name.clone(),
+                    jwt_audience: jwks.jwt_audience.clone(),
+                })
         }
     }
 
-    if let Some((project_id, branch_id)) = settings {
-        info!("successfully loaded new config");
-        JWKS_ROLE_MAP.store(Some(Arc::new(JwksRoleSettings {
-            roles: data.roles,
-            project_id,
-            branch_id,
-        })));
-    }
+    info!("successfully loaded new config");
+    JWKS_ROLE_MAP.store(Some(Arc::new(JwksRoleSettings { roles })));
 
     Ok(())
 }

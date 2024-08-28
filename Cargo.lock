@@ -4422,6 +4422,7 @@ dependencies = [
  "camino-tempfile",
  "chrono",
  "clap",
+ "compute_api",
  "consumption_metrics",
  "crossbeam-deque",
  "dashmap",

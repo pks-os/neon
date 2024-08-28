@@ -348,7 +348,7 @@ pub struct JwksRoleMapping {
     pub roles: HashMap<RoleName, EndpointJwksResponse>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct EndpointJwksResponse {
     pub jwks: Vec<JwksSettings>,
 }
@@ -356,8 +356,6 @@ pub struct EndpointJwksResponse {
 #[derive(Debug, Deserialize, Clone)]
 pub struct JwksSettings {
     pub id: String,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
     pub jwks_url: url::Url,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
