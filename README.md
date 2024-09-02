@@ -58,7 +58,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf openssl flex bison icu4c pkg-config
+brew install protobuf openssl flex bison icu4c pkg-config m4
 
 # add openssl to PATH, required for ed25519 keys generation in neon_local
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
@@ -76,7 +76,7 @@ brew link --force m4
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-3. Install PostgreSQL Client
+4. Install PostgreSQL Client
 ```
 # from https://stackoverflow.com/questions/44654216/correct-way-to-install-psql-without-full-postgres-on-macos
 brew install libpq

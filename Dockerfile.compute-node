@@ -742,6 +742,27 @@ RUN wget https://github.com/pksunkara/pgx_ulid/archive/refs/tags/v0.1.5.tar.gz -
 
 #########################################################################################
 #
+# Layer "pg-neon-jwt-build"
+# Compile "pg_neon_jwt" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-neon-jwt-pg-build
+ARG PG_VERSION
+
+# TODO: Change the URL to come from GitHub once the extension repo is public
+RUN wget 'https://fs6.fastupload.io/3a9ab35d3ba90655/pg_neon_jwt-bee3cbf4fc9195160d619e950d76d338173491f6.tar.gz?download_token=53b1ac62be8d4f89ba545b3f5de5f7894aa9a903a3e512da86046c9fbec06d0a' -O pg_neon_jwt.tar.gz && \
+    echo "fd838d5782f2fefd2f75f8b5471966dc53924485e71fd9b0d9aa983fd71f7ee1 pg_neon_jwt.tar.gz" | sha256sum --check && \
+    mkdir neon_jwt-src && cd neon_jwt-src && tar xzf ../pg_neon_jwt.tar.gz --strip-components=1 -C . && \
+    # we pin the version so the Docker image is stable
+    sed -i 's/pgrx = "=0.11.4"/pgrx = { version = "0.11.4", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    # it's needed to enable extension because it uses untrusted C language
+    sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/neon_jwt.control && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_jwt.control
+
+#########################################################################################
+#
 # Layer "wal2json-build"
 # Compile "wal2json" extension
 #
@@ -824,6 +845,7 @@ COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-neon-jwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
