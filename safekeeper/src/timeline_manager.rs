@@ -44,7 +44,6 @@ pub(crate) struct StateSnapshot {
     pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
-    pub(crate) cfile_peer_horizon_lsn: Lsn,
     pub(crate) cfile_remote_consistent_lsn: Lsn,
     pub(crate) cfile_backup_lsn: Lsn,
 
@@ -67,7 +66,6 @@ impl StateSnapshot {
             commit_lsn: state.inmem.commit_lsn,
             backup_lsn: state.inmem.backup_lsn,
             remote_consistent_lsn: state.inmem.remote_consistent_lsn,
-            cfile_peer_horizon_lsn: state.peer_horizon_lsn,
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
