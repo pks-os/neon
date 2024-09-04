@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use bytes::BytesMut;
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -27,6 +26,7 @@ use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
+use crate::virtual_file::dio::IoBufferMut;
 use crate::virtual_file::{self, VirtualFile};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -50,11 +50,12 @@ pub struct VectoredBlob {
 /// Return type of [`VectoredBlobReader::read_blobs`]
 pub struct VectoredBlobsBuf {
     /// Buffer for all blobs in this read
-    pub buf: BytesMut,
+    pub buf: IoBufferMut,
     /// Offsets into the buffer and metadata for all blobs in this read
     pub blobs: Vec<VectoredBlob>,
 }
 
+// TODO(yuchen): Only call this if compressed. Could use old buffer to do `Value::des` and avoid a copy.
 pub(crate) async fn decompress<'a>(
     buf: &'a [u8],
     compression_bits: u8,
@@ -519,7 +520,7 @@ impl<'a> VectoredBlobReader<'a> {
     pub async fn read_blobs(
         &self,
         read: &VectoredRead,
-        buf: BytesMut,
+        buf: IoBufferMut,
         ctx: &RequestContext,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
@@ -704,6 +705,7 @@ impl StreamingVectoredReadPlanner {
 #[cfg(test)]
 mod tests {
     use anyhow::Error;
+    use virtual_file::dio::IoBufferMut;
 
     use crate::context::DownloadBehavior;
     use crate::page_cache::PAGE_SZ;
@@ -1002,7 +1004,7 @@ mod tests {
 
         // Multiply by two (compressed data might need more space), and add a few bytes for the header
         let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
-        let mut buf = BytesMut::with_capacity(reserved_bytes);
+        let mut buf = IoBufferMut::with_capacity_aligned(reserved_bytes, 512);
 
         let mode = VectoredReadCoalesceMode::get();
         let vectored_blob_reader = VectoredBlobReader::new(&file);

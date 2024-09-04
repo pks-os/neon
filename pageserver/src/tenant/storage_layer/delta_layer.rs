@@ -43,12 +43,12 @@ use crate::tenant::vectored_blob_io::{
     VectoredRead, VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
+use crate::virtual_file::dio::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::{self, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -987,7 +987,7 @@ impl DeltaLayerInner {
             .0
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
-        let mut buf = Some(BytesMut::with_capacity(buf_size));
+        let mut buf = Some(IoBufferMut::with_capacity_aligned(buf_size, 512));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
@@ -1014,7 +1014,7 @@ impl DeltaLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(buf_size));
+                    buf = Some(IoBufferMut::with_capacity_aligned(buf_size, 512));
 
                     continue;
                 }
@@ -1193,7 +1193,7 @@ impl DeltaLayerInner {
             .map(|x| x.0.get())
             .unwrap_or(8192);
 
-        let mut buffer = Some(BytesMut::with_capacity(max_read_size));
+        let mut buffer = Some(IoBufferMut::with_capacity_aligned(max_read_size, 512));
 
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
@@ -1258,8 +1258,10 @@ impl DeltaLayerInner {
 
                 let mut buf = buffer.take().unwrap();
 
+                // TODO(yuchen): Maybe could use the streaming iterator instead?
                 buf.clear();
-                buf.reserve(read.size());
+                // TODO(yuchen): IoBufferMut currently do not handle reserve.
+                // buf.reserve(read.size());
                 let res = reader.read_blobs(&read, buf, ctx).await?;
 
                 for blob in res.blobs {
@@ -1301,6 +1303,7 @@ impl DeltaLayerInner {
                         })
                         .unwrap_or(false);
 
+                    // TODO(yuchen: I don't think we need per blob copy.
                     per_blob_copy.clear();
                     per_blob_copy.extend_from_slice(&data);
 
@@ -1562,7 +1565,7 @@ impl<'a> DeltaLayerIterator<'a> {
         let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);
         let mut next_batch = std::collections::VecDeque::new();
         let buf_size = plan.size();
-        let buf = BytesMut::with_capacity(buf_size);
+        let buf = IoBufferMut::with_capacity_aligned(buf_size, 512);
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
@@ -1943,7 +1946,7 @@ pub(crate) mod test {
                 &vectored_reads,
                 constants::MAX_VECTORED_READ_BYTES,
             );
-            let mut buf = Some(BytesMut::with_capacity(buf_size));
+            let mut buf = Some(IoBufferMut::with_capacity_aligned(buf_size, 512));
 
             for read in vectored_reads {
                 let blobs_buf = vectored_blob_reader
