@@ -19,3 +19,4 @@ pub mod pg_helpers;
 pub mod spec;
 pub mod swap;
 pub mod sync_sk;
+pub mod extensions;

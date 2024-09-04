@@ -21,3 +21,8 @@ class EndpointHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/database_schema?database={database}")
         res.raise_for_status()
         return res.text
+
+    def extensions(self):
+        res = self.get(f"http://localhost:{self.port}/extensions")
+        res.raise_for_status()
+        return res.json()

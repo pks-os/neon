@@ -165,6 +165,29 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // method to get info about installed extensions
+        (&Method::GET, "/extensions") => {
+            info!("serving /extensions GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let connstr = compute.connstr.clone();
+            let res = crate::extensions::get_installed_extensions(connstr).await;
+            match res {
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(_) => {
+                    render_json_error("can't get list of installed extension", StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
         // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);

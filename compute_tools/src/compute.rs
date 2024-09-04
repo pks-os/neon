@@ -33,6 +33,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::extensions::log_installed_extensions;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -789,6 +790,9 @@ impl ComputeNode {
                 let mut client = Client::connect(connstr.as_str(), NoTls)?;
                 handle_neon_extension_upgrade(&mut client)
                     .context("handle_neon_extension_upgrade")?;
+
+                // Check if there are any extensions installed and log them
+                log_installed_extensions(connstr).context("handle_neon_extension_upgrade")?;
                 Ok::<_, anyhow::Error>(())
             };
             if let Err(err) = func() {

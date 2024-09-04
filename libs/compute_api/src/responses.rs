@@ -138,3 +138,18 @@ pub enum ControlPlaneComputeStatus {
     // should be able to start with provided spec.
     Attached,
 }
+
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Extension
+{
+    pub extname: String,
+    pub lowest_version: String,
+    pub highest_version: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExtenstionsList
+{
+    pub extensions: Vec<Extension>,
+}
