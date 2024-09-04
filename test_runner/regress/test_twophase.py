@@ -1,7 +1,7 @@
 import os
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
+from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn, wait_for_last_flush_lsn
 
 
 def twophase_test_on_timeline(env: NeonEnv):
@@ -99,7 +99,7 @@ def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
     very first page of a WAL segment and the server was started up at that first page.
     """
     env = neon_simple_env
-    env.neon_cli.create_branch("test_twophase", "empty")
+    timeline_id = env.neon_cli.create_branch("test_twophase", "empty")
 
     endpoint = env.endpoints.create_start(
         "test_twophase", config_lines=["max_prepared_transactions=5", "log_statement=all"]
@@ -109,6 +109,7 @@ def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
     # FIXME: this is only needed work around bug https://github.com/neondatabase/neon/issues/8911.
     # Once that's fixed, this can be removed.
     endpoint.safe_psql("SELECT pg_current_xact_id()")
+    wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, timeline_id)
 
     endpoint.stop_and_destroy()
 
