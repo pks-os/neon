@@ -34,8 +34,8 @@ use crate::tenant::disk_btree::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
-    VectoredReadPlanner,
+    self, BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader,
+    VectoredRead, VectoredReadPlanner,
 };
 use crate::tenant::{PageReconstructError, Timeline};
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
@@ -549,10 +549,12 @@ impl ImageLayerInner {
             let buf = BytesMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
 
-            let frozen_buf = blobs_buf.buf.freeze();
-
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = frozen_buf.slice(meta.start..meta.end);
+                let img_buf = vectored_blob_io::decompress(
+                    &blobs_buf.buf[meta.start..meta.end],
+                    meta.compression_bits,
+                )
+                .await?;
 
                 key_count += 1;
                 writer
@@ -602,10 +604,27 @@ impl ImageLayerInner {
 
             match res {
                 Ok(blobs_buf) => {
-                    let frozen_buf = blobs_buf.buf.freeze();
-
                     for meta in blobs_buf.blobs.iter() {
-                        let img_buf = frozen_buf.slice(meta.start..meta.end);
+                        let decompressed = vectored_blob_io::decompress(
+                            &blobs_buf.buf[meta.start..meta.end],
+                            meta.compression_bits,
+                        )
+                        .await;
+
+                        let img_buf = match decompressed {
+                            Ok(buf) => buf,
+                            Err(e) => {
+                                reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::Other(anyhow!(e).context(format!(
+                                        "Failed to decompress blob from virtual file {}",
+                                        self.file.path,
+                                    ))),
+                                );
+
+                                continue;
+                            }
+                        };
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
@@ -1036,9 +1055,12 @@ impl<'a> ImageLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf: Bytes = blobs_buf.buf.freeze();
         for meta in blobs_buf.blobs.iter() {
-            let img_buf = frozen_buf.slice(meta.start..meta.end);
+            let img_buf = vectored_blob_io::decompress(
+                &blobs_buf.buf[meta.start..meta.end],
+                meta.compression_bits,
+            )
+            .await?;
             next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
         }
         self.key_values_batch = next_batch;

@@ -44,6 +44,7 @@ pub struct VectoredBlob {
     pub start: usize,
     pub end: usize,
     pub meta: BlobMeta,
+    pub compression_bits: u8,
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -52,6 +53,28 @@ pub struct VectoredBlobsBuf {
     pub buf: BytesMut,
     /// Offsets into the buffer and metadata for all blobs in this read
     pub blobs: Vec<VectoredBlob>,
+}
+
+pub(crate) async fn decompress<'a>(
+    buf: &'a [u8],
+    compression_bits: u8,
+) -> Result<bytes::Bytes, std::io::Error> {
+    let mut decompressed_vec = Vec::new();
+    if compression_bits == BYTE_UNCOMPRESSED {
+        // TODO(yuchen: can we avoid this copy? `Option<Bytes>`?
+        Ok(bytes::Bytes::copy_from_slice(buf))
+    } else if compression_bits == BYTE_ZSTD {
+        let mut decoder = async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
+        decoder.write_all(buf).await?;
+        decoder.flush().await?;
+        Ok(bytes::Bytes::from(decompressed_vec))
+    } else {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid compression byte {compression_bits:x}"),
+        );
+        Err(error)
+    }
 }
 
 /// Description of one disk read for multiple blobs.
@@ -518,7 +541,7 @@ impl<'a> VectoredBlobReader<'a> {
             );
         }
 
-        let mut buf = self
+        let buf = self
             .file
             .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
             .await?
@@ -532,9 +555,6 @@ impl<'a> VectoredBlobReader<'a> {
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
-
-        // Some scratch space, put here for reusing the allocation
-        let mut decompressed_vec = Vec::new();
 
         for (blob_start, meta) in blobs_at {
             let blob_start_in_buf = blob_start - start_offset;
@@ -561,35 +581,14 @@ impl<'a> VectoredBlobReader<'a> {
                 )
             };
 
-            let start_raw = blob_start_in_buf + size_length;
-            let end_raw = start_raw + blob_size;
-            let (start, end);
-            if compression_bits == BYTE_UNCOMPRESSED {
-                start = start_raw as usize;
-                end = end_raw as usize;
-            } else if compression_bits == BYTE_ZSTD {
-                let mut decoder =
-                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
-                decoder
-                    .write_all(&buf[start_raw as usize..end_raw as usize])
-                    .await?;
-                decoder.flush().await?;
-                start = buf.len();
-                buf.extend_from_slice(&decompressed_vec);
-                end = buf.len();
-                decompressed_vec.clear();
-            } else {
-                let error = std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid compression byte {compression_bits:x}"),
-                );
-                return Err(error);
-            }
+            let start = (blob_start_in_buf + size_length) as usize;
+            let end = start + blob_size as usize;
 
             metas.push(VectoredBlob {
                 start,
                 end,
                 meta: *meta,
+                compression_bits,
             });
         }
 
@@ -1022,7 +1021,11 @@ mod tests {
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
             let read_blob = &result.blobs[0];
-            let read_buf = &result.buf[read_blob.start..read_blob.end];
+            let read_buf = &decompress(
+                &result.buf[read_blob.start..read_blob.end],
+                read_blob.compression_bits,
+            )
+            .await?;
             assert_eq!(blob, read_buf, "mismatch for idx={idx} at offset={offset}");
             buf = result.buf;
         }

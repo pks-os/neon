@@ -39,8 +39,8 @@ use crate::tenant::disk_btree::{
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
-    VectoredReadCoalesceMode, VectoredReadPlanner,
+    self, BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader,
+    VectoredRead, VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
@@ -1025,7 +1025,28 @@ impl DeltaLayerInner {
                     continue;
                 }
 
-                let value = Value::des(&blobs_buf.buf[meta.start..meta.end]);
+                let decompressed = vectored_blob_io::decompress(
+                    &blobs_buf.buf[meta.start..meta.end],
+                    meta.compression_bits,
+                )
+                .await;
+                let decompressed = match decompressed {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        reconstruct_state.on_key_error(
+                            meta.meta.key,
+                            PageReconstructError::Other(anyhow!(e).context(format!(
+                                "Failed to decompress blob from virtual file {}",
+                                self.file.path,
+                            ))),
+                        );
+
+                        ignore_key_with_err = Some(meta.meta.key);
+                        continue;
+                    }
+                };
+
+                let value = Value::des(&decompressed);
                 let value = match value {
                     Ok(v) => v,
                     Err(e) => {
@@ -1244,10 +1265,20 @@ impl DeltaLayerInner {
                 for blob in res.blobs {
                     let key = blob.meta.key;
                     let lsn = blob.meta.lsn;
-                    let data = &res.buf[blob.start..blob.end];
+                    let data = vectored_blob_io::decompress(
+                        &res.buf[blob.start..blob.end],
+                        blob.compression_bits,
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "blob failed to decompress for {}@{}, {}..{}: ",
+                            blob.meta.key, blob.meta.lsn, blob.start, blob.end
+                        )
+                    })?;
 
                     #[cfg(debug_assertions)]
-                    Value::des(data)
+                    Value::des(&data)
                         .with_context(|| {
                             format!(
                                 "blob failed to deserialize for {}@{}, {}..{}: {:?}",
@@ -1255,7 +1286,7 @@ impl DeltaLayerInner {
                                 blob.meta.lsn,
                                 blob.start,
                                 blob.end,
-                                utils::Hex(data)
+                                utils::Hex(&data)
                             )
                         })
                         .unwrap();
@@ -1263,15 +1294,15 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = crate::repository::ValueBytes::will_init(data)
+                    let will_init = crate::repository::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
-                            tracing::error!(data=?utils::Hex(data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
+                            tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
                         })
                         .unwrap_or(false);
 
                     per_blob_copy.clear();
-                    per_blob_copy.extend_from_slice(data);
+                    per_blob_copy.extend_from_slice(&data);
 
                     let (tmp, res) = writer
                         .put_value_bytes(
@@ -1535,9 +1566,13 @@ impl<'a> DeltaLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf = blobs_buf.buf.freeze();
         for meta in blobs_buf.blobs.iter() {
-            let value = Value::des(&frozen_buf[meta.start..meta.end])?;
+            let decompressed = vectored_blob_io::decompress(
+                &blobs_buf.buf[meta.start..meta.end],
+                meta.compression_bits,
+            )
+            .await?;
+            let value = Value::des(&decompressed)?;
             next_batch.push_back((meta.meta.key, meta.meta.lsn, value));
         }
         self.key_values_batch = next_batch;
@@ -1915,8 +1950,13 @@ pub(crate) mod test {
                     .read_blobs(&read, buf.take().expect("Should have a buffer"), &ctx)
                     .await?;
                 for meta in blobs_buf.blobs.iter() {
-                    let value = &blobs_buf.buf[meta.start..meta.end];
-                    assert_eq!(value, entries_meta.index[&(meta.meta.key, meta.meta.lsn)]);
+                    let value = vectored_blob_io::decompress(
+                        &blobs_buf.buf[meta.start..meta.end],
+                        meta.compression_bits,
+                    )
+                    .await?;
+
+                    assert_eq!(&value, &entries_meta.index[&(meta.meta.key, meta.meta.lsn)]);
                 }
 
                 buf = Some(blobs_buf.buf);
