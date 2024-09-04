@@ -32,7 +32,6 @@ use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
 use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
-use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
@@ -256,9 +255,7 @@ where
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
         let pgversion = self.timeline.pg_version;
-        let subdirs = dispatch_pgversion!(pgversion, {
-            &pgv::bindings::PGDATA_SUBDIRS[..]
-        });
+        let subdirs = dispatch_pgversion!(pgversion, { &pgv::bindings::PGDATA_SUBDIRS[..] });
 
         // Create pgdata subdirs structure
         for dir in subdirs.iter() {
@@ -611,7 +608,7 @@ where
     //
     // Extract twophase state files
     //
-    async fn add_twophase_file(&mut self, xid: TransactionId) -> Result<(), BasebackupError> {
+    async fn add_twophase_file(&mut self, xid: u64) -> Result<(), BasebackupError> {
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
