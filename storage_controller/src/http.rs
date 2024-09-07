@@ -21,7 +21,7 @@ use pageserver_api::models::{
     TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_client::mgmt_api;
+use pageserver_client::{mgmt_api, BlockUnblock};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -369,6 +369,23 @@ async fn handle_tenant_timeline_detach_ancestor(
     json_response(StatusCode::OK, res)
 }
 
+async fn handle_tenant_timeline_block_unblock_gc(
+    service: Arc<Service>,
+    req: Request<Body>,
+    dir: BlockUnblock,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    service
+        .tenant_timeline_block_unblock_gc(tenant_id, timeline_id, dir)
+        .await?;
+
+    json_response(StatusCode::OK, ())
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -535,6 +552,17 @@ async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiErr
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
     let node_status = state.service.get_node(node_id).await?;
+
+    json_response(StatusCode::OK, node_status)
+}
+
+async fn handle_node_shards(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let state = get_state(&req);
+    let node_id: NodeId = parse_request_param(&req, "node_id")?;
+
+    let node_status = state.service.get_node_shards(node_id).await?;
 
     json_response(StatusCode::OK, node_status)
 }
@@ -1109,6 +1137,13 @@ pub fn make_router(
         .get("/control/v1/node/:node_id", |r| {
             named_request_span(r, handle_node_status, RequestName("control_v1_node_status"))
         })
+        .get("/control/v1/node/:node_id/shards", |r| {
+            named_request_span(
+                r,
+                handle_node_shards,
+                RequestName("control_v1_node_describe"),
+            )
+        })
         .get("/control/v1/leader", |r| {
             named_request_span(r, handle_get_leader, RequestName("control_v1_get_leader"))
         })
@@ -1271,6 +1306,26 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_detach_ancestor,
                     RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/block_gc",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    |s, r| handle_tenant_timeline_block_unblock_gc(s, r, BlockUnblock::Block),
+                    RequestName("v1_tenant_timeline_block_unblock_gc"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/unblock_gc",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    |s, r| handle_tenant_timeline_block_unblock_gc(s, r, BlockUnblock::Unblock),
+                    RequestName("v1_tenant_timeline_block_unblock_gc"),
                 )
             },
         )
