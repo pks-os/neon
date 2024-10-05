@@ -1265,6 +1265,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "cfg-if",
  "chrono",
  "clap",
@@ -7334,12 +7335,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "anyhow",
- "aws-config",
- "aws-runtime",
- "aws-sigv4",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-types",
  "base64 0.21.1",
  "base64ct",
  "bitflags 2.4.1",
@@ -7413,7 +7408,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
- "uuid",
  "zeroize",
  "zstd",
  "zstd-safe",
