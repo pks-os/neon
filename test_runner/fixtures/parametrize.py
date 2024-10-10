@@ -9,7 +9,12 @@ import toml
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
+    from fixtures.utils import AuxFileStore
+
 
 if TYPE_CHECKING:
     from typing import Any, Optional
@@ -41,8 +46,8 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_io_buffer_alignment() -> Optional[int]:
-    return None
+def pageserver_virtual_file_io_mode() -> Optional[str]:
+    return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
 
 
 @pytest.fixture(scope="function", autouse=True)

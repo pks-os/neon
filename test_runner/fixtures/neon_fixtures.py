@@ -395,7 +395,7 @@ class NeonEnvBuilder:
         pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
-        pageserver_io_buffer_alignment: Optional[int] = None,
+        pageserver_virtual_file_io_mode: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -449,7 +449,7 @@ class NeonEnvBuilder:
 
         self.storage_controller_port_override = storage_controller_port_override
 
-        self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
+        self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
 
         assert test_name.startswith(
             "test_"
@@ -1038,7 +1038,7 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
-        self.pageserver_io_buffer_alignment = config.pageserver_io_buffer_alignment
+        self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: dict[str, Any] = {
@@ -1102,7 +1102,8 @@ class NeonEnv:
                         for key, value in override.items():
                             ps_cfg[key] = value
 
-            ps_cfg["io_buffer_alignment"] = self.pageserver_io_buffer_alignment
+            if self.pageserver_virtual_file_io_mode is not None:
+                ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
@@ -1407,7 +1408,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
-    pageserver_io_buffer_alignment: Optional[int],
+    pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with no authentication and no safekeepers.
@@ -1433,7 +1434,7 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
-        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
         env = builder.init_start()
 
@@ -1457,7 +1458,7 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
-    pageserver_io_buffer_alignment: Optional[int],
+    pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1492,7 +1493,7 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
-        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
@@ -3485,8 +3486,6 @@ class Endpoint(PgProtocol, LogUtils):
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
 
-        log.info(f"Starting postgres endpoint {self.endpoint_id}")
-
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
             safekeepers=self.active_safekeepers,
@@ -3658,15 +3657,13 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: Optional[list[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
-        allow_multiple=False,
+        allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         """
         Create an endpoint, apply config, and start Postgres.
         Returns self.
         """
-
-        started_at = time.time()
 
         self.create(
             branch_name=branch_name,
@@ -3682,8 +3679,6 @@ class Endpoint(PgProtocol, LogUtils):
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
         )
-
-        log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
         return self
 
@@ -3920,7 +3915,6 @@ class Safekeeper(LogUtils):
         return self
 
     def stop(self, immediate: bool = False) -> Safekeeper:
-        log.info(f"Stopping safekeeper {self.id}")
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
@@ -4004,7 +3998,7 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
-    # List partial uploaded segments of this safekeeper. Works only for
+    # list partial uploaded segments of this safekeeper. Works only for
     # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
@@ -4299,7 +4293,7 @@ def pytest_addoption(parser: Parser):
     )
 
 
-SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 
