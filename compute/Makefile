@@ -6,13 +6,15 @@ jsonnet_files = $(wildcard \
 all: neon_collector.yml neon_collector_autoscaling.yml sql_exporter.yml sql_exporter_autoscaling.yml
 
 neon_collector.yml: $(jsonnet_files)
-	JSONNET_PATH=etc jsonnet \
+	JSONNET_PATH=jsonnet:etc jsonnet \
 		--output-file etc/$@ \
+		--ext-str pg_version=$(PG_VERSION) \
 		etc/neon_collector.jsonnet
 
 neon_collector_autoscaling.yml: $(jsonnet_files)
-	JSONNET_PATH=etc jsonnet \
+	JSONNET_PATH=jsonnet:etc jsonnet \
 		--output-file etc/$@ \
+		--ext-str pg_version=$(PG_VERSION) \
 		etc/neon_collector_autoscaling.jsonnet
 
 sql_exporter.yml: $(jsonnet_files)
@@ -35,3 +37,11 @@ clean:
 		etc/neon_collector_autoscaling.yml \
 		etc/sql_exporter.yml \
 		etc/sql_exporter_autoscaling.yml
+
+.PHONY: jsonnetfmt-test
+jsonnetfmt-test:
+	jsonnetfmt --test $(jsonnet_files)
+
+.PHONY: jsonnetfmt-format
+jsonnetfmt-format:
+	jsonnetfmt --in-place $(jsonnet_files)
