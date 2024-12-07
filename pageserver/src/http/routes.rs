@@ -2036,15 +2036,23 @@ async fn timeline_compact_handler(
         parse_query_param::<_, bool>(&request, "wait_until_scheduled_compaction_done")?
             .unwrap_or(false);
 
+    let sub_compaction = compact_request
+        .as_ref()
+        .map(|r| r.sub_compaction)
+        .unwrap_or(false);
     let options = CompactOptions {
         compact_range: compact_request
             .as_ref()
             .and_then(|r| r.compact_range.clone()),
         compact_below_lsn: compact_request.as_ref().and_then(|r| r.compact_below_lsn),
         flags,
+        sub_compaction,
     };
 
-    let scheduled = compact_request.map(|r| r.scheduled).unwrap_or(false);
+    let scheduled = compact_request
+        .as_ref()
+        .map(|r| r.scheduled)
+        .unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
@@ -2148,16 +2156,20 @@ async fn timeline_checkpoint_handler(
     // By default, checkpoints come with a compaction, but this may be optionally disabled by tests that just want to flush + upload.
     let compact = parse_query_param::<_, bool>(&request, "compact")?.unwrap_or(true);
 
+    let wait_until_flushed: bool =
+        parse_query_param(&request, "wait_until_flushed")?.unwrap_or(true);
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
     async {
         let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
         let timeline = active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id).await?;
-        timeline
-            .freeze_and_flush()
-            .await
-            .map_err(|e| {
+        if wait_until_flushed {
+            timeline.freeze_and_flush().await
+        } else {
+            timeline.freeze().await.and(Ok(()))
+        }.map_err(|e| {
                 match e {
                     tenant::timeline::FlushLayerError::Cancelled => ApiError::ShuttingDown,
                     other => ApiError::InternalServerError(other.into()),

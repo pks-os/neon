@@ -53,7 +53,7 @@ use utils::{
     postgres_client::PostgresClientProtocol,
     sync::gate::{Gate, GateGuard},
 };
-use wal_decoder::serialized_batch::SerializedValueBatch;
+use wal_decoder::serialized_batch::{SerializedValueBatch, ValueMeta};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -785,6 +785,9 @@ pub(crate) struct CompactRequest {
     /// Whether the compaction job should be scheduled.
     #[serde(default)]
     pub scheduled: bool,
+    /// Whether the compaction job should be split across key ranges.
+    #[serde(default)]
+    pub sub_compaction: bool,
 }
 
 #[serde_with::serde_as]
@@ -814,6 +817,9 @@ pub(crate) struct CompactOptions {
     /// If set, the compaction will only compact the LSN below this value.
     /// This option is only used by GC compaction.
     pub compact_below_lsn: Option<Lsn>,
+    /// Enable sub-compaction (split compaction job across key ranges).
+    /// This option is only used by GC compaction.
+    pub sub_compaction: bool,
 }
 
 impl std::fmt::Debug for Timeline {
@@ -1457,23 +1463,31 @@ impl Timeline {
         Ok(lease)
     }
 
-    /// Flush to disk all data that was written with the put_* functions
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
+    pub(crate) async fn freeze(&self) -> Result<u64, FlushLayerError> {
+        self.freeze0().await
+    }
+
+    /// Freeze and flush the open in-memory layer, waiting for it to be written to disk.
     #[instrument(skip(self), fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%self.timeline_id))]
     pub(crate) async fn freeze_and_flush(&self) -> Result<(), FlushLayerError> {
         self.freeze_and_flush0().await
     }
 
+    /// Freeze the current open in-memory layer. It will be written to disk on next iteration.
+    /// Returns the flush request ID which can be awaited with wait_flush_completion().
+    pub(crate) async fn freeze0(&self) -> Result<u64, FlushLayerError> {
+        let mut g = self.write_lock.lock().await;
+        let to_lsn = self.get_last_record_lsn();
+        self.freeze_inmem_layer_at(to_lsn, &mut g).await
+    }
+
     // This exists to provide a non-span creating version of `freeze_and_flush` we can call without
     // polluting the span hierarchy.
     pub(crate) async fn freeze_and_flush0(&self) -> Result<(), FlushLayerError> {
-        let token = {
-            // Freeze the current open in-memory layer. It will be written to disk on next
-            // iteration.
-            let mut g = self.write_lock.lock().await;
-
-            let to_lsn = self.get_last_record_lsn();
-            self.freeze_inmem_layer_at(to_lsn, &mut g).await?
-        };
+        let token = self.freeze0().await?;
         self.wait_flush_completion(token).await
     }
 
@@ -1629,6 +1643,7 @@ impl Timeline {
                 flags,
                 compact_range: None,
                 compact_below_lsn: None,
+                sub_compaction: false,
             },
             ctx,
         )
@@ -2384,7 +2399,7 @@ impl Timeline {
 
             result
                 .metrics
-                .last_record_gauge
+                .last_record_lsn_gauge
                 .set(disk_consistent_lsn.0 as i64);
             result
         })
@@ -3506,7 +3521,7 @@ impl Timeline {
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
 
-        self.metrics.last_record_gauge.set(new_lsn.0 as i64);
+        self.metrics.last_record_lsn_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
     }
 
@@ -3874,6 +3889,10 @@ impl Timeline {
     fn set_disk_consistent_lsn(&self, new_value: Lsn) -> bool {
         let old_value = self.disk_consistent_lsn.fetch_max(new_value);
         assert!(new_value >= old_value, "disk_consistent_lsn must be growing monotonously at runtime; current {old_value}, offered {new_value}");
+
+        self.metrics
+            .disk_consistent_lsn_gauge
+            .set(new_value.0 as i64);
         new_value != old_value
     }
 
@@ -5910,6 +5929,23 @@ impl<'a> TimelineWriter<'a> {
     ) -> anyhow::Result<()> {
         if !batch.has_data() {
             return Ok(());
+        }
+
+        // In debug builds, assert that we don't write any keys that don't belong to this shard.
+        // We don't assert this in release builds, since key ownership policies may change over
+        // time. Stray keys will be removed during compaction.
+        if cfg!(debug_assertions) {
+            for metadata in &batch.metadata {
+                if let ValueMeta::Serialized(metadata) = metadata {
+                    let key = Key::from_compact(metadata.key);
+                    assert!(
+                        self.shard_identity.is_key_local(&key)
+                            || self.shard_identity.is_key_global(&key),
+                        "key {key} does not belong on shard {}",
+                        self.shard_identity.shard_index()
+                    );
+                }
+            }
         }
 
         let batch_max_lsn = batch.max_lsn;
